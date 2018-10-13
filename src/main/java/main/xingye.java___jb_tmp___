@@ -1,0 +1,74 @@
+/**
+ * 新增兴业机构权限控制
+ */
+public ApiResponse checkBranchAuth(DmpLogin form) {
+        TXtglOrganization org = tXtglOrganizationDao.getOrg(form.getOperator_no());
+        if (org == null) {
+        LOGGER.info("数据异常，用户组织机构信息不存在：login_id=" + form.getOperator_no());
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.USER_BRANCH_INFO_NOT_EXIST,
+        "数据异常，用户组织机构信息不存在：login_id=" + form.getOperator_no());
+        } else if (StringUtils.isEmpty(org.getOrganization_levelid())) {
+        LOGGER.info("数据异常，组织机构层级关系为空：login_id=" + form.getOperator_no());
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.BRANCH_RELATION_IS_NULL,
+        "数据异常，组织机构层级关系为空：login_id=" + form.getOperator_no());
+        }
+        Map<String, String> paramsMap = new HashMap<>();
+        paramsMap.put("loginUserId", form.getOperator_no());
+        paramsMap.put("modularId", request.getParameter("modularId"));
+        JSONObject authResp = HttpUtil.httpRequest(config.getAfaDataScope() + AUTH_DATA_SCOPE, paramsMap, "post");
+        if (authResp == null || authResp.get("code") == null || authResp.get("data") == null) {
+        LOGGER.info("接口返回格式错误：" + JSONObject.toJSONString(paramsMap) + "；Response result is："
+        + JSONObject.toJSONString(authResp));
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.RESPONSE_FORMAT_ERR);
+        }
+        if (!"0".equals(authResp.getString("code"))
+        || !"00000".equals(authResp.getJSONObject("data").getString("errcode"))) {
+        LOGGER.info("人员查询维度及数据范围接口调用失败；params is：" + JSONObject.toJSONString(paramsMap) + "；Response result is："
+        + JSONObject.toJSONString(authResp));
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.AFA_DATA_SCOPE_INTERFACE_CALL_FAIL,
+        JSONObject.toJSONString(authResp));
+        }
+        if (StringUtils.isEmpty(authResp.getJSONObject("data").getString("none"))) {
+        LOGGER.info("接口返回格式错误：" + JSONObject.toJSONString(paramsMap) + "；Response result is："
+        + JSONObject.toJSONString(authResp));
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.RESPONSE_FORMAT_ERR);
+        }
+        List<AfaDataScope> scopelist = JSONArray.parseArray(authResp.getJSONObject("data").getString("none"),
+        AfaDataScope.class);
+        Map<String, AfaDataScope> dataScopeMap = new HashMap<>();
+        for (AfaDataScope afaDataScope : scopelist) {
+        dataScopeMap.put(afaDataScope.getDataScope(), afaDataScope);
+        }
+        // dataScope=70表示总部，非总部的机构层级关系须包含9998机构编号
+        if (!dataScopeMap.containsKey("70") && !org.getOrganization_levelid().contains("9998")) {
+        LOGGER.info("分公司权限且组织机构层级关系不包含9998机构编号,数据异常");
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.BRANCH_DATA_ERROR, "分公司权限且组织机构层级关系不包含9998机构编号, 数据异常");
+        }
+        // 总部权限的统一指定999999为总部编号
+        if (dataScopeMap.containsKey("70")) {
+        org.setOrganization_code("999999");
+        } else {
+        List<String> branchLsit = Arrays.asList(org.getOrganization_levelid().split("\\."));
+        // 9998机构编号的下一位作为分公司编号
+        int num = branchLsit.indexOf("9998");
+        if (num < branchLsit.size() - 1 && StringUtils.isNotEmpty(branchLsit.get(num + 1))) {
+        org.setOrganization_code(branchLsit.get(num + 1));
+        } else {
+        LOGGER.info("9998下级机构编号不存在，数据异常：login_id=" + form.getOperator_no() + "；organization_levelid="
+        + org.getOrganization_levelid());
+        return BackVoUtil.setErrorBack(ErrorBase.AfaErr.BRANCH_DATA_ERROR, "9998下级机构编号不存在，数据异常：login_id="
+        + form.getOperator_no() + "；organization_levelid=" + org.getOrganization_levelid());
+        }
+        }
+        String operatorStr = redisCluster.get(form.getAccess_token());
+        if (StringUtils.isEmpty(operatorStr)) {
+        LOGGER.info("用户缓存数据不存在：" + form.getAccess_token());
+        return BackVoUtil.setErrorBack(ErrorBase.OperatorErr.OPERATOR_CACHE_NOT_EXIST,
+        "用户缓存信息不存在，AccessToken：" + form.getAccess_token());
+        }
+        OperatorCache operatorCache = JSON.parseObject(operatorStr, OperatorCache.class);
+        operatorCache.setData_scope(dataScopeMap.containsKey("70") ? "70" : "");
+        operatorCache.settXtglOrganization(org);
+        redisCluster.set(form.getAccess_token(), operatorCache.toString(), manageConf.getTokenExpireTime() * 60);
+        return BackVoUtil.setSuccessBack();
+        }
